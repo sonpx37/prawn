@@ -316,7 +316,7 @@ module Prawn
 
           width.times do
             color = data.read(1).unpack('C').first
-            alpha.putc alpha_palette[color]
+            alpha.putc alpha_palette[color] rescue alpha.putc 0
           end
         end
       end
