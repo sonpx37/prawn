@@ -34,62 +34,64 @@ module Prawn
       # <tt>data</tt>:: A binary string of PNG data
       #
       def initialize(data)
-        data = StringIO.new(data.dup)
+        @prawn_fast_png_data = data
+        unfilter_image_data
+        # data = StringIO.new(data.dup)
 
-        data.read(8)  # Skip the default header
+        # data.read(8)  # Skip the default header
 
-        @palette  = ""
-        @img_data = ""
-        @transparency = {}
+        # @palette  = ""
+        # @img_data = ""
+        # @transparency = {}
 
-        loop do
-          chunk_size  = data.read(4).unpack("N")[0]
-          section     = data.read(4)
-          case section
-          when 'IHDR'
-            # we can grab other interesting values from here (like width,
-            # height, etc)
-            values = data.read(chunk_size).unpack("NNCCCCC")
+        # loop do
+        #   chunk_size  = data.read(4).unpack("N")[0]
+        #   section     = data.read(4)
+        #   case section
+        #   when 'IHDR'
+        #     # we can grab other interesting values from here (like width,
+        #     # height, etc)
+        #     values = data.read(chunk_size).unpack("NNCCCCC")
 
-            @width              = values[0]
-            @height             = values[1]
-            @bits               = values[2]
-            @color_type         = values[3]
-            @compression_method = values[4]
-            @filter_method      = values[5]
-            @interlace_method   = values[6]
-          when 'PLTE'
-            @palette << data.read(chunk_size)
-          when 'IDAT'
-            @img_data << data.read(chunk_size)
-          when 'tRNS'
-            # This chunk can only occur once and it must occur after the
-            # PLTE chunk and before the IDAT chunk
-            @transparency = {}
-            case @color_type
-            when 3
-              @transparency[:palette] = data.read(chunk_size).unpack('C*')
-            when 0
-              # Greyscale. Corresponding to entries in the PLTE chunk.
-              # Grey is two bytes, range 0 .. (2 ^ bit-depth) - 1
-              grayval = data.read(chunk_size).unpack("n").first
-              @transparency[:grayscale] = grayval
-            when 2
-              # True colour with proper alpha channel.
-              @transparency[:rgb] = data.read(chunk_size).unpack("nnn")
-            end
-          when 'IEND'
-            # we've got everything we need, exit the loop
-            break
-          else
-            # unknown (or un-important) section, skip over it
-            data.seek(data.pos + chunk_size)
-          end
+        #     @width              = values[0]
+        #     @height             = values[1]
+        #     @bits               = values[2]
+        #     @color_type         = values[3]
+        #     @compression_method = values[4]
+        #     @filter_method      = values[5]
+        #     @interlace_method   = values[6]
+        #   when 'PLTE'
+        #     @palette << data.read(chunk_size)
+        #   when 'IDAT'
+        #     @img_data << data.read(chunk_size)
+        #   when 'tRNS'
+        #     # This chunk can only occur once and it must occur after the
+        #     # PLTE chunk and before the IDAT chunk
+        #     @transparency = {}
+        #     case @color_type
+        #     when 3
+        #       @transparency[:palette] = data.read(chunk_size).unpack('C*')
+        #     when 0
+        #       # Greyscale. Corresponding to entries in the PLTE chunk.
+        #       # Grey is two bytes, range 0 .. (2 ^ bit-depth) - 1
+        #       grayval = data.read(chunk_size).unpack("n").first
+        #       @transparency[:grayscale] = grayval
+        #     when 2
+        #       # True colour with proper alpha channel.
+        #       @transparency[:rgb] = data.read(chunk_size).unpack("nnn")
+        #     end
+        #   when 'IEND'
+        #     # we've got everything we need, exit the loop
+        #     break
+        #   else
+        #     # unknown (or un-important) section, skip over it
+        #     data.seek(data.pos + chunk_size)
+        #   end
 
-          data.read(4)  # Skip the CRC
-        end
+        #   data.read(4)  # Skip the CRC
+        # end
 
-        @img_data = Zlib::Inflate.inflate(@img_data)
+        # @img_data = Zlib::Inflate.inflate(@img_data)
       end
 
       # number of color components to each pixel
@@ -257,40 +259,77 @@ module Prawn
 
       private
 
-      def split_image_data
-        alpha_bytes = bits / 8
-        color_bytes = colors * bits / 8
+       def unfilter_image_data
+        img = Magick::Image.from_blob(@prawn_fast_png_data).first
+        # image blob not needed anymore, let GC take care of it
+        @prawn_fast_png_data = nil
 
-        scanline_length  = (color_bytes + alpha_bytes) * self.width + 1
-        scanlines = @img_data.bytesize / scanline_length
-        pixels = self.width * self.height
+        # get only one color value per pixel (Intensity) for grayscale+alpha images
+        format = color_type == 4 ? 'I' : 'RGB'
 
-        data = StringIO.new(@img_data)
-        data.binmode
-
-        color_data = [0x00].pack('C') * (pixels * color_bytes + scanlines)
-        color = StringIO.new(color_data)
-        color.binmode
-
-        @alpha_channel = [0x00].pack('C') * (pixels * alpha_bytes + scanlines)
-        alpha = StringIO.new(@alpha_channel)
-        alpha.binmode
-
-        scanlines.times do |line|
-          data.seek(line * scanline_length)
-
-          filter = data.getbyte
-
-          color.putc filter
-          alpha.putc filter
-
-          self.width.times do
-            color.write data.read(color_bytes)
-            alpha.write data.read(alpha_bytes)
-          end
+        case bits
+        when 8
+          img_data      = img.export_pixels_to_str(0, 0, width, height, format)
+          alpha_channel = img.export_pixels_to_str(0, 0, width, height, 'A')
+        when 16
+          # export_pixels_to_str returns little-endian data, but we need big-endian
+          # so it's usually more efficient to use export_pixels and pack
+          img_data   = img.export_pixels(0, 0, width, height, format).pack('n*')
+          alpha_data = img.export_pixels(0, 0, width, height, 'A')
+          alpha_bits = respond_to?(:alpha_channel_bits) ? alpha_channel_bits : 16
+          alpha_channel =
+            case alpha_bits
+            when 8
+              # downsample 16-bit alpha channel to 8 bits for Adobe Reader support
+              alpha_data.map { |byte| byte >> 8 }.pack('c*')
+            when 16
+              alpha_data.pack('n*')
+            else
+              raise Errors::UnsupportedImageType, "Can't create #{alpha_channel_bits}-bit alpha channel"
+            end
+        else
+          raise Errors::UnsupportedImageType, "Can't handle #{bits}-bit PNG images"
         end
 
-        @img_data = color_data
+        @img_data      = Zlib::Deflate.deflate(img_data)
+        @alpha_channel = Zlib::Deflate.deflate(alpha_channel)
+      end
+
+      def split_image_data
+        # alpha_bytes = bits / 8
+        # color_bytes = colors * bits / 8
+
+        # scanline_length  = (color_bytes + alpha_bytes) * self.width + 1
+        # scanlines = @img_data.bytesize / scanline_length
+        # pixels = self.width * self.height
+
+        # data = StringIO.new(@img_data)
+        # data.binmode
+
+        # color_data = [0x00].pack('C') * (pixels * color_bytes + scanlines)
+        # color = StringIO.new(color_data)
+        # color.binmode
+
+        # @alpha_channel = [0x00].pack('C') * (pixels * alpha_bytes + scanlines)
+        # alpha = StringIO.new(@alpha_channel)
+        # alpha.binmode
+
+        # scanlines.times do |line|
+        #   data.seek(line * scanline_length)
+
+        #   filter = data.getbyte
+
+        #   color.putc filter
+        #   alpha.putc filter
+
+        #   self.width.times do
+        #     color.write data.read(color_bytes)
+        #     alpha.write data.read(alpha_bytes)
+        #   end
+        # end
+
+        # @img_data = color_data
+        unfilter_image_data
       end
 
       def generate_alpha_channel
@@ -306,7 +345,7 @@ module Prawn
         data = StringIO.new(@img_data)
         data.binmode
 
-        @alpha_channel = [0x00].pack('C') * (pixels + scanlines)
+        # @alpha_channel = [0x00].pack('C') * (pixels + scanlines)
         alpha = StringIO.new(@alpha_channel)
         alpha.binmode
 
